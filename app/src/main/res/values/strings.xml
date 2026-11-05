@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">AR Ruler</string>
+    <string name="add_point">Add point</string>
+    <string name="undo">Undo</string>
+    <string name="clear">Clear</string>
+    <string name="move_phone">Move your phone slowly to detect surfaces</string>
+    <string name="aim">Aim at a surface, then tap Add point</string>
+    <string name="ready">Surface found — tap Add point</string>
+    <string name="camera_needed">Camera permission is required to measure</string>
+    <string name="arcore_unsupported">This device does not support ARCore</string>
+</resources>
