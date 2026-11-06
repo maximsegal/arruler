@@ -16,6 +16,8 @@ import com.google.android.material.button.MaterialButton
 import com.google.ar.core.Anchor
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
+import com.google.ar.core.HitResult
+import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.DepthPoint
 import com.google.ar.core.Plane
 import com.google.ar.core.Point
@@ -47,7 +49,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
     // GL-thread-only state
     private val anchors = ArrayList<Anchor>()
-    private var latestHit: Pose? = null
+    private var pendingAdd = false
 
     private val viewM = FloatArray(16)
     private val projM = FloatArray(16)
@@ -71,7 +73,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         surface.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         surface.setWillNotDraw(false)
 
-        findViewById<MaterialButton>(R.id.btnAdd).setOnClickListener { surface.queueEvent { addPoint() } }
+        findViewById<MaterialButton>(R.id.btnAdd).setOnClickListener { surface.queueEvent { pendingAdd = true } }
         findViewById<MaterialButton>(R.id.btnUndo).setOnClickListener { surface.queueEvent { undo() } }
         findViewById<MaterialButton>(R.id.btnClear).setOnClickListener { surface.queueEvent { clearAll() } }
         btnUnit.setOnClickListener {
@@ -155,12 +157,6 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
     // ---- Measurement actions (GL thread) ----
 
-    private fun addPoint() {
-        val pose = latestHit ?: return
-        val s = session ?: return
-        anchors.add(s.createAnchor(pose))
-    }
-
     private fun undo() {
         if (anchors.isNotEmpty()) anchors.removeAt(anchors.size - 1).detach()
     }
@@ -200,9 +196,9 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
 
         val camera = frame.camera
         if (camera.trackingState != TrackingState.TRACKING) {
-            latestHit = null
+            pendingAdd = false
             publish(Snapshot(tracking = false))
-            updateUi(false, null, 0f)
+            updateUi(false, null, 0f, 0, camera.trackingFailureReason)
             return
         }
 
@@ -210,16 +206,25 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         camera.getProjectionMatrix(projM, 0, 0.02f, 50f)
         Matrix.multiplyMM(vpM, 0, projM, 0, viewM, 0)
 
-        // Reticle: hit-test the screen center.
-        var hitPose: Pose? = null
+        // Reticle: hit-test the screen center. Prefer detected planes (stable);
+        // fall back to depth/feature points only if no plane is hit.
+        var best: HitResult? = null
+        var fallback: HitResult? = null
         for (hit in frame.hitTest(width / 2f, height / 2f)) {
             val t = hit.trackable
-            val ok = (t is Plane && t.isPoseInPolygon(hit.hitPose)) ||
-                (t is Point && t.orientationMode == Point.OrientationMode.ESTIMATED_SURFACE_NORMAL) ||
-                t is DepthPoint
-            if (ok) { hitPose = hit.hitPose; break }
+            if (t is Plane && t.isPoseInPolygon(hit.hitPose)) { best = hit; break }
+            if (fallback == null && (t is DepthPoint ||
+                    (t is Point && t.orientationMode == Point.OrientationMode.ESTIMATED_SURFACE_NORMAL))
+            ) fallback = hit
         }
-        latestHit = hitPose
+        val chosen = best ?: fallback
+        val hitPose: Pose? = chosen?.hitPose
+
+        if (pendingAdd) {
+            pendingAdd = false
+            // Anchor to the trackable so the point follows ARCore's refinement of the surface.
+            if (chosen != null) anchors.add(chosen.createAnchor())
+        }
 
         // Drop anchors that stopped tracking being valid (stopped) from display.
         val poses = anchors.filter { it.trackingState == TrackingState.TRACKING }
@@ -251,9 +256,17 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var lastTotal = Float.NaN
     private var lastStatus = ""
     private var lastUnit: UnitSystem? = null
-    private fun updateUi(tracking: Boolean, hit: Pose?, totalM: Float, count: Int = 0) {
+    private fun updateUi(
+        tracking: Boolean, hit: Pose?, totalM: Float, count: Int = 0,
+        reason: TrackingFailureReason = TrackingFailureReason.NONE,
+    ) {
         val msg = when {
-            !tracking -> getString(R.string.move_phone)
+            !tracking -> when (reason) {
+                TrackingFailureReason.EXCESSIVE_MOTION -> "Moving too fast — slow down"
+                TrackingFailureReason.INSUFFICIENT_LIGHT -> "Too dark — add light"
+                TrackingFailureReason.INSUFFICIENT_FEATURES -> "Point at a textured surface"
+                else -> getString(R.string.move_phone)
+            }
             hit == null -> getString(R.string.aim)
             else -> getString(R.string.ready)
         }
